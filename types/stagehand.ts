@@ -6,7 +6,7 @@ import { LogLine } from "./log";
 import { AvailableModel, ClientOptions } from "./model";
 
 export interface ConstructorParams {
-  env: "LOCAL" | "BROWSERBASE";
+  env: "LOCAL" | "BROWSERBASE" | "EXISTING_CHROME" | "EXTENSION";
   apiKey?: string;
   projectId?: string;
   verbose?: 0 | 1 | 2;
@@ -20,6 +20,11 @@ export interface ConstructorParams {
   browserbaseSessionID?: string;
   modelName?: AvailableModel;
   modelClientOptions?: ClientOptions;
+  // Parameters for connecting to existing Chrome
+  chromeUrl?: string;  // The WebSocket URL or debugging URL of the existing Chrome instance
+  chromePort?: number; // The port number of the existing Chrome instance (if not using WebSocket URL)
+  // Parameters for extension mode
+  tabId?: number;     // The ID of the tab to control when running as an extension
 }
 
 export interface InitOptions {

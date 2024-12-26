@@ -31,8 +31,8 @@ import { LLMProvider } from "./llm/LLMProvider";
 import { logLineToString } from "./utils";
 import { StagehandPage } from "./StagehandPage";
 import { StagehandContext } from "./StagehandContext";
-
-dotenv.config({ path: ".env" });
+import * as dotenv from "dotenv";
+dotenv.config({ path: __dirname + "/.env" });
 
 const DEFAULT_MODEL_NAME = "gpt-4o";
 const BROWSERBASE_REGION_DOMAIN = {
@@ -45,11 +45,14 @@ const BROWSERBASE_REGION_DOMAIN = {
 async function getBrowser(
   apiKey: string | undefined,
   projectId: string | undefined,
-  env: "LOCAL" | "BROWSERBASE" = "LOCAL",
+  env: "LOCAL" | "BROWSERBASE" | "EXISTING_CHROME" | "EXTENSION" = "LOCAL",
   headless: boolean = false,
   logger: (message: LogLine) => void,
   browserbaseSessionCreateParams?: Browserbase.Sessions.SessionCreateParams,
   browserbaseSessionID?: string,
+  chromeUrl?: string,
+  chromePort?: number,
+  tabId?: number,
 ): Promise<BrowserResult> {
   if (env === "BROWSERBASE") {
     if (!apiKey) {
@@ -197,6 +200,137 @@ async function getBrowser(
     const context = browser.contexts()[0];
 
     return { browser, context, debugUrl, sessionUrl, sessionId, env };
+  } else if (env === "EXTENSION") {
+    logger({
+      category: "init",
+      message: "initializing in extension mode...",
+      level: 0,
+    });
+
+    if (typeof chrome === "undefined" || !chrome.tabs) {
+      throw new Error("Extension mode requires chrome.tabs API to be available");
+    }
+
+    if (!tabId) {
+      throw new Error("tabId is required for extension mode");
+    }
+
+    try {
+      // In extension mode, we'll use the chrome.tabs API directly
+      // This requires modifying the Page implementation to use chrome.tabs.* methods
+      const context = {
+        // Implement a minimal BrowserContext interface that works with chrome.tabs
+        pages: () => [
+          {
+            // Basic Page implementation using chrome.tabs API
+            evaluate: (fn: Function) => chrome.tabs.executeScript(tabId, { code: `(${fn.toString()})()` }),
+            goto: (url: string) => chrome.tabs.update(tabId, { url }),
+            waitForSelector: (selector: string) => new Promise((resolve) => {
+              const checkElement = () => {
+                chrome.tabs.executeScript(tabId, {
+                  code: `document.querySelector('${selector}') !== null`
+                }, (result) => {
+                  if (result[0]) resolve();
+                  else setTimeout(checkElement, 100);
+                });
+              };
+              checkElement();
+            }),
+            // Add other required Page methods here
+          }
+        ],
+        addInitScript: ({ content }: { content: string }) => 
+          chrome.tabs.executeScript(tabId, { code: content }),
+      } as unknown as BrowserContext;
+
+      logger({
+        category: "init",
+        message: "extension mode initialized",
+        level: 0,
+        auxiliary: {
+          tabId: {
+            value: tabId.toString(),
+            type: "string",
+          },
+        },
+      });
+
+      return { context, env: "EXTENSION" };
+    } catch (error) {
+      logger({
+        category: "init",
+        message: "failed to initialize extension mode",
+        level: 0,
+        auxiliary: {
+          error: {
+            value: error.message,
+            type: "string",
+          },
+          trace: {
+            value: error.stack,
+            type: "string",
+          },
+        },
+      });
+      throw error;
+    }
+  } else if (env === "EXISTING_CHROME") {
+    logger({
+      category: "init",
+      message: "connecting to existing Chrome instance...",
+      level: 0,
+    });
+
+    if (!chromeUrl && !chromePort) {
+      throw new Error(
+        "Either chromeUrl or chromePort is required for EXISTING_CHROME environment.",
+      );
+    }
+
+    const connectUrl = chromeUrl || `http://localhost:${chromePort}`;
+
+    try {
+      const browser = await chromium.connectOverCDP(connectUrl);
+      const context = browser.contexts()[0];
+
+      if (!context) {
+        throw new Error(
+          "No browser context found in the existing Chrome instance.",
+        );
+      }
+
+      logger({
+        category: "init",
+        message: "connected to existing Chrome instance",
+        level: 0,
+        auxiliary: {
+          connectUrl: {
+            value: connectUrl,
+            type: "string",
+          },
+        },
+      });
+
+      await applyStealthScripts(context);
+      return { browser, context, env: "EXISTING_CHROME" };
+    } catch (error) {
+      logger({
+        category: "init",
+        message: "failed to connect to existing Chrome instance",
+        level: 0,
+        auxiliary: {
+          error: {
+            value: error.message,
+            type: "string",
+          },
+          trace: {
+            value: error.stack,
+            type: "string",
+          },
+        },
+      });
+      throw error;
+    }
   } else {
     logger({
       category: "init",
@@ -306,7 +440,7 @@ async function applyStealthScripts(context: BrowserContext) {
 export class Stagehand {
   private stagehandPage!: StagehandPage;
   private stagehandContext!: StagehandContext;
-  private intEnv: "LOCAL" | "BROWSERBASE";
+  private intEnv: "LOCAL" | "BROWSERBASE" | "EXISTING_CHROME" | "EXTENSION";
 
   public browserbaseSessionID?: string;
   public readonly domSettleTimeoutMs: number;
@@ -321,6 +455,8 @@ export class Stagehand {
   private projectId: string | undefined;
   private externalLogger?: (logLine: LogLine) => void;
   private browserbaseSessionCreateParams?: Browserbase.Sessions.SessionCreateParams;
+  private chromeUrl?: string;
+  private chromePort?: number;
   public variables: { [key: string]: unknown };
   private contextPath?: string;
   private llmClient: LLMClient;
@@ -344,6 +480,8 @@ export class Stagehand {
       browserbaseSessionID,
       modelName,
       modelClientOptions,
+      chromeUrl,
+      chromePort,
     }: ConstructorParams = {
       env: "BROWSERBASE",
     },
@@ -368,6 +506,8 @@ export class Stagehand {
     this.headless = headless ?? false;
     this.browserbaseSessionCreateParams = browserbaseSessionCreateParams;
     this.browserbaseSessionID = browserbaseSessionID;
+    this.chromeUrl = chromeUrl;
+    this.chromePort = chromePort;
   }
 
   public get logger(): (logLine: LogLine) => void {
@@ -390,9 +530,13 @@ export class Stagehand {
     return this.stagehandPage.page;
   }
 
-  public get env(): "LOCAL" | "BROWSERBASE" {
+  public get env(): "LOCAL" | "BROWSERBASE" | "EXISTING_CHROME" | "EXTENSION" {
     if (this.intEnv === "BROWSERBASE" && this.apiKey && this.projectId) {
       return "BROWSERBASE";
+    } else if (this.intEnv === "EXISTING_CHROME") {
+      return "EXISTING_CHROME";
+    } else if (this.intEnv === "EXTENSION") {
+      return "EXTENSION";
     }
     return "LOCAL";
   }
@@ -419,6 +563,8 @@ export class Stagehand {
         this.logger,
         this.browserbaseSessionCreateParams,
         this.browserbaseSessionID,
+        this.chromeUrl,
+        this.chromePort,
       ).catch((e) => {
         console.error("Error in init:", e);
         const br: BrowserResult = {

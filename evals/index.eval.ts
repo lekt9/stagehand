@@ -24,9 +24,8 @@ import { Eval } from "braintrust";
 import { EvalFunction, SummaryResult, Testcase } from "../types/evals";
 import { EvalLogger } from "./logger";
 import { AvailableModel } from "../types/model";
-import dotenv from "dotenv";
-dotenv.config();
-
+import * as dotenv from "dotenv";
+dotenv.config({ path: __dirname + "/.env" });
 const MAX_CONCURRENCY = 20;
 const TRIAL_COUNT = 5;
 

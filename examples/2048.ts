@@ -3,10 +3,12 @@ import { z } from "zod";
 async function example() {
   console.log("🎮 Starting 2048 bot...");
   const stagehand = new Stagehand({
-    env: "LOCAL",
+    env: "EXISTING_CHROME",
+    chromePort: 9222, // Default Chrome debugging port
     verbose: 1,
     debugDom: true,
     domSettleTimeoutMs: 100,
+    modelName: "gpt-4o-mini",
   });
   try {
     console.log("🌟 Initializing Stagehand...");
